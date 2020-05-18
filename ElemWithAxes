@@ -1,0 +1,123 @@
+classdef ElemWithAxes < matlab.System
+    % ElemWithAxes:  An antenna element with a local frame of reference
+    %
+    % This class combines an antenna element from the phased array toolbox
+    % along with a local coordinate system to facilitate geometric
+    % computations.
+    %
+    % In addition, it provides smooth interpolation of the directivity
+    % which is not performed in the phased array toolbox
+    properties
+        % The antenna object from the phased array toolbox
+        ant = [];
+        
+        % Azimuth and elevation angle of the element peak directivity
+        axesAz = 0;
+        axesEl = 0;
+        
+        % Axes of the element local coordinate frame of reference
+        axesLoc = eye(3);
+        
+        % Frequency in Hz
+        fc = 28e9;
+        
+        % Directivity interpolant
+        dirInterp = [];
+        
+        % Velocity vector in 3D in m/s
+        vel = [0 0 0];
+    end
+    methods
+        function obj = ElemWithAxes(fc, ant)
+            % Constructor 
+            % Inputs:  fc is the carrier frequency in Hz and ant is 
+            % an antenna compatible with the phased array toolbox.  It must
+            % support the ant.pattern() method.
+            
+            obj.fc = fc
+            obj.ant = ant
+          
+        end
+        
+        function alignAxes(obj,az,el)
+            % Aligns the axes to given az and el angles
+            
+            % Seting the axesAz and axesEl to az and el
+            
+            obj.axesAz = az;
+            obj.axesEl = el;
+            
+            % Using the azelaxes() function to create a 3 x 3 array
+            % corresponding to an orthonormal basis for the local
+            % coordinate system of the array aligned in the direction
+            % (az,el).  Save this in the axesLoc property.
+            
+            obj.axesLoc = azelaxes(az,el);
+        end
+        
+        function dop = doppler(obj,az,el)
+            % Computes the Doppler shift of a set of paths 
+            % The angles of the paths are given as (az,el) pairs
+            % in the global frame of reference.
+            
+            % Using the sph2cart method to find unit vectors in the
+            % direction of each path.  That is, create an array where 
+            % u(:,i) is a unit vector in the angle (az(i), el(i)).
+             
+            npath = length(az);
+            [u1,u2,u3] = sph2cart(deg2rad(az),deg2rad(el),ones(1,npath));
+            u = [u1.',u2.',u3.'];
+            vcos = obj.vel*(u.');
+            vc = physconst('lightspeed');
+            dop = vcos.*obj.fc/vc;
+            
+           
+        end
+        
+    end
+    
+    methods (Access = protected)
+         function setupImpl(obj)
+            % setup:  This is called before the first step.
+            % We will use this point to interpolator
+            
+            % Get the pattern from ant.pattern
+            [dirPat,azPat,elPat] = obj.ant.pattern(...
+                obj.fc,'Type', 'Directivity');
+            
+            
+            % Create the gridded interpolant object.  
+            
+            obj.dirInterp = griddedInterpolant({elPat,azPat},dirPat);
+            
+         end
+        
+         
+        function dir = stepImpl(obj, az, el)
+            % Computes the directivity along az and el angles
+            % The angles are given in the global frame of reference
+            % We do this by first rotating the angles into the local axes
+            
+            % Using the global2localcoord function to translate 
+            % the gloabl angles (az(i), el(i)) into angles
+            % (azLoc(i),elLoc(i)) in the local coordinate system.  use
+            % the 'ss' option along with the local axes obj.axesLoc.
+            
+            uglobal = [az; el; ones(1,length(az))];
+            ulocal = global2localcoord(uglobal, 'ss', zeros(3,1), obj.axesLoc);
+            azLoc = ulocal(1,:);
+            elLoc = ulocal(2,:);
+            
+            % Run the interplationn object to compute the directivity
+            % in the local angles
+            
+            dir = obj.dirInterp(elLoc,azLoc);
+            
+            
+            
+            
+        end
+        
+    end
+    
+end
