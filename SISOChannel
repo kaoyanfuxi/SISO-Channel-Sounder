@@ -1,0 +1,101 @@
+classdef SISOMPChan < matlab.System
+    % SISOMPChan:  SISO multi-path fading channel    
+    properties 
+        fsamp;   % Sample rate in Hz
+                
+        % Path properties
+        gain;  % path gains in dB
+        dly;   % delays in seconds
+        dop;   % doppler shift of each path in Hz
+        
+        % Fractional delay object
+        fracDly;
+        
+        % Initial set of phases for the next step call
+        phaseInit = [];
+                                
+    end
+    
+    methods 
+        function obj = SISOMPChan(varargin)
+           
+            if nargin >= 1
+                obj.set(varargin{:});
+            end
+            
+        end
+        
+    end
+    methods (Access = protected)
+        function setupImpl(obj)
+             
+              % For the SISO MP channel, we will use this point to
+              % construct the fractional delay object.  
+           
+              obj.fracDly = dsp.VariableFractionalDelay(...
+                'InterpolationMethod', 'Farrow','FilterLength',8,...
+                'FarrowSmallDelayAction','Use off-centered kernel',...
+                'MaximumDelay', 1024);                           
+        end
+      
+        function y = stepImpl(obj, x)
+         
+            dlySamp = obj.dly * obj.fsamp;
+            
+            %  Computing gain of each path in linear scale
+            
+            gainLin = 10.^(0.05*obj.gain);
+            
+            obj.fracDly = dsp.VariableFractionalDelay(...
+                'InterpolationMethod', 'Farrow','FilterLength',8,...
+                'FarrowSmallDelayAction','Use off-centered kernel',...
+                'MaximumDelay', 1024);
+            
+            % Using the fracDly object to compute delayed versions of
+            % the input x.
+            
+  
+            nsamp = length(x);
+            npath = length(dlySamp);
+            for i = 1:npath
+                xdly(:,i) = obj.fracDly.step(x,dlySamp(i));
+            end
+            
+            % Computing the phase rotations on each pathUsing the Doppler shifts,
+           
+            % phase(i,k) = phase rotation on sample i and path k
+            
+            phase = 2*pi*(0:nsamp)'*obj.dop/obj.fsamp + obj.phaseInit;
+            
+            % Save the final phase, phase(nsamp+1,:)
+            % as phaseInit for the next step.
+            
+            obj.phaseInit = phase(nsamp+1,:);
+            
+            % Applying  the phases and gain to each path, add the
+            % resutls and storing in y.
+            
+            y = exp(1i*phase(1:nsamp,:)).*xdly.*gainLin;
+            y = sum(y,2);
+            
+        end
+           function resetImpl(obj)
+            
+            obj.fracDly.reset();
+            
+            % Initializing phases, phaseInit, to a row vector of 
+            % dimension equal to the number of paths with uniform values 
+            % from 0 to 2pi
+            
+            npath = length(obj.gain);
+            obj.phaseInit = 2*pi*rand(1,npath);
+        end
+        
+        function releaseImpl(obj)
+            % release:  Called after the release method
+            
+            % Releasing the fracDly object
+            obj.fracDly.release();
+        end
+    end
+end
