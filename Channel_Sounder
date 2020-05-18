@@ -1,0 +1,282 @@
+%% Lab:  5G Channel Sounding with Doppler
+% Channel sounders are used to measure the channel response between a TX 
+% and RX.  These are vital to study propagation and are also an excellent 
+% tool for debugging the front-end of a transceiver system.  In this lab,
+% we will simulate a simple channel sounder over a fading channel with
+% time-variations and Doppler.  The very same tools are used
+% in radar.  
+%
+
+%
+% * Describe cluster-delay line (CDL) models
+% * Get parameters for 5G CDL models using the 
+%   <https://www.mathworks.com/products/5g.html 5G MATLAB toolbox>
+
+
+%% Loading the 3GPP NR channel model, In the CDL
+% model, the channel is described by a set of path clusters.  Each path
+% cluster has various parameters such as an average gain, delay and angles
+% of arrival and departure.  The parameters for this model can be loaded 
+% with the following commands that are part of the 5G Toolbox.  
+fc = 28e9;    % carrier in Hz
+dlySpread = 50e-9;  % delay spread in seconds
+chan = nrCDLChannel('DelayProfile','CDL-C',...
+    'DelaySpread',dlySpread, 'CarrierFrequency', fc, ...
+    'NormalizePathGains', true);
+chan.TransmitAntennaArray.Size = [1 1 2 1 1];
+chan.ReceiveAntennaArray.Size = [1 1 2 1 1];
+
+chaninfo = info(chan);
+
+
+% Extract the parameters from chaninfo:
+gain = chaninfo.AveragePathGains;
+aoaAz = chaninfo.AnglesAoA;
+aoaEl = 90 - chaninfo.AnglesZoA;
+aodAz = chaninfo.AnglesAoD;
+aodEl = 90 - chaninfo.AnglesZoD;
+dly = chaninfo.PathDelays;
+
+% Compute the number of paths
+npath = length(gain);
+
+
+% Each stem in this plot would represent one multi-path component.
+
+figure();
+stem(dly*1e9,gain,'BaseValue',-40);
+xlabel('delay(ns)');
+ylabel('gain(dB)');
+title('gain vs delay');
+grid on;
+
+%% Patch Element
+% In this simulation, we will assume the TX and RX patch microstrip
+% antennas.  We use the code below to create the antenna element from the
+% antenna demo.
+
+% Constants
+vp = physconst('lightspeed');  % speed of light
+lambda = vp/fc;   % wavelength
+
+% Create a patch element
+len = 0.49*lambda;
+groundPlaneLen = lambda;
+ant = patchMicrostrip(...
+    'Length', len, 'Width', 1.5*len, ...
+    'GroundPlaneLength', groundPlaneLen, ...
+    'GroundPlaneWidth', groundPlaneLen, ...
+    'Height', 0.01*lambda, ...
+    'FeedOffset', [0.25*len 0]);
+
+% Tilt the element so that the maximum energy is in the x-axis
+ant.Tilt = 90;
+ant.TiltAxis = [0 1 0];
+
+%% Create UE and gNB antennas
+% We will simulate a channel from a base station cell to a mobile device.
+% In 5G terminology, the base station cell is called the gNB and the mobile
+% device is called the UE.  We first create a model for the
+% antennas on each device.  
+% To organize the code better, we have created a class |ElemWithAxes| to
+% represent the antenna element.  This class is basically a wrapper for 
+% the AntennaElement class to include a frame of reference and methods 
+% to compute gains relative to this frame of reference.
+
+
+
+% elemUE and elemgNB, of the ElemWithAxes class represent the elements 
+% at the UE and gNB
+
+elemUE = ElemWithAxes(fc,ant);
+elemgNB = ElemWithAxes(fc,ant);
+
+%% Rotate the UE and gNB antennas
+% The response of the channel will depend on the orientation of the antenna
+% elements.  To make this simple, we will align the UE and gNB elements
+% to the strongest path.  
+
+% Finding the index of the path with the maximum gain.
+
+[m,i] = max(gain);
+
+% Call the elemUE.alignAxes() methods to align the UE antenna
+% to the angle of arrival corresponding to the strongest path. 
+
+elemUE.alignAxes(aoaAz(i),aoaEl(i));
+
+% Call the elemgNB.alignAxes() methods to align the gNB antenna
+% to the angle of departure corresponding to the strongest path.
+
+elemgNB.alignAxes(aodAz(i),aodEl(i));
+
+
+%% Get the directivity along the paths
+% We next compute the directional gains along to the paths.  
+% For the ElemWithAxes class, we will define the step method
+% to take angles and return the directivity in dBi.  
+
+
+% Call the elemUE.step() method with the angles of arrivals of the
+% paths to get the directivity of the paths on the UE antenna.
+
+dirUE  = elemUE.step(aoaAz,aoaEl);
+
+% Call the elemgNB.step() method with the angles of departures of the
+% paths to get the directivity of the paths on the gNB antenna.
+
+dirgNB  = elemgNB.step(aodAz,aodEl);
+
+% Compute gainDir, the vector of gains + UE and gNB directivity.
+
+gainDir = gain + dirUE + dirgNB;
+
+figure();
+stem(dly*1e9,gain,'BaseValue',-40);
+hold on;
+stem(dly*1e9,gainDir,'BaseValue',-40);
+hold off;
+grid on;
+legend('gain','gainDir');
+xlabel('delay(ns)');
+
+%% Compute the Doppler
+% We next compute the Doppler for each path.  
+
+
+% Use the elemUE.set() method to set the mobile velocity to 100 km/h
+% in the y-direction.  
+
+vkmh = 100;
+elemUE.set('vel', [0 100*5/18 0]);
+dop = [];
+
+% Call the elemUE.doppler() method to find the doppler shifts of all
+% the paths based on the angle of arrivals
+
+dop = elemUE.doppler(aoaAz,aoaEl);
+
+
+%% Transmitting a channel sounding signal
+% The TX simply repeated transmits a signal of length nfft.  Each
+% repetition is called a frame.  We will use the following parameters.
+
+fsamp = 4*120e3*1024;  % sample rate in Hz
+nfft = 1024;           % number of samples per frame = FFT window
+nframe = 512;          % number of frames
+
+
+%%
+% In frequency-domain channel sounding we create the TX samples in
+% frequency domain.  
+
+% Using the qammod function to create nfft random QPSK symbols
+% and storing the results in x0Fd.
+
+% Take the IFFT of the signal representing the time-domain samples.
+% Store in x0.
+
+x = [];
+for i = 1:nframe
+bits = randi([0,1],[2*nfft,1]); 
+x0Fd = qammod(bits,4,'InputType','bit');
+x0 = ifft(x0Fd,nfft);
+x((i-1)*nfft+1:i*nfft) = x0; 
+end
+
+%% Create a multi-path channel object
+% To simulate the multi-path channel, we have started the creation of a
+% class, |SISOMPChan|.  The constructor of the object is already written in
+% a way that you can call construct the channel with parameters with the
+% syntax:
+%     chan = SISOMPChan('Prop1', Val1, 'Prop2', val2, ...);
+
+chan = SISOMPChan('gain', gainDir, 'dly', dly,'dop',dop,'fsamp',fsamp);
+    
+
+%% Implementing the channel
+% The SIMOMPChan object derives from the matlab.System class and should
+% implement:
+% *  setupImpl():  Called before the first step after the object is
+%                  constructured
+% *  resetImpl():  Called when a simulation starts
+% *  releaseImpl():  Called on the first step after a reset() or release()
+% *  stepImpl():  Called on each step
+
+
+y = chan.step(x);
+
+% 
+% Adding AWGN 20 dB below the y.
+
+SNR = 20;
+N0 = mean(abs(y).^2)*10^(-0.1*SNR);
+
+ynoisy = y + sqrt(N0/2)*(randn(length(y),1) + 1i*randn(length(y),1));
+
+
+%% Estimating the channel in frequency domain
+% We will now perform a simple channel estimate in frequency-domain
+
+% Reshaping ynoisy into a nfft x nframes matrix and take the FFT of
+% each column and storing the results in yfd.
+
+ynoisy_reshaped = reshape(ynoisy,[nfft,nframe]);
+
+yfd = fft(ynoisy_reshaped);
+
+
+hestFd = yfd./x0Fd;
+
+% Estimate the frequency domain channel by dividing each frame of
+% yfd by the transmitted frequency domain symbols x0Fd and storing the results
+% in hestFd
+
+% Plotting the estimated channel magnitude in dB.
+
+hestFd_dB = 20*log10(abs(hestFd));
+
+f = fc + linspace(-fsamp/2,fsamp/2,nfft);
+f = f/1e9;
+t = linspace(0,nframe*1e9/fsamp,nframe);
+
+figure();
+imagesc('XData',t,'YData',f,'CData',20*log10(abs(hestFd)));
+xlabel('time(ns)');
+ylabel('frequency(GHz)');
+title('Estimated channel magnitude in dB');
+colorbar();
+grid on;
+
+t1 = linspace(0,length(x)*1e9/fsamp,length(x)); 
+%%
+figure();
+plot(t1,abs(x));
+hold on;
+plot(t1,abs(y));
+hold off;
+grid on;
+title('x and y')
+xlabel('time(ns)');
+legend('Input-x','Output-y');
+%%
+
+
+%% Estimating the channel in time-domain
+
+
+% Taking the IFFT across the columns and storing the results in a 
+% matrix hest
+hest = ifft(hestFd);
+
+% Plotting the magnitude of the samples of the impulse response
+% in one of the symbols.  
+
+t = (0:nfft-1)*1e9/fsamp;
+figure();
+plot(t, (abs(hest(:,1))));
+xlim([0 nfft/fsamp/1e-9]);
+title('Impulse Response')
+xlabel('Delay (ns)');
+ylabel('Magnitude of the samples');
+grid on;
